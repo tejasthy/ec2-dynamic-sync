@@ -1,0 +1,22 @@
+# Core dependencies
+boto3>=1.26.0
+click>=8.0.0
+pydantic>=2.0.0
+PyYAML>=6.0
+rich>=13.0.0
+watchdog>=3.0.0
+
+# Optional dependencies for enhanced functionality
+psutil>=5.9.0  # System monitoring
+paramiko>=3.0.0  # Alternative SSH client
+cryptography>=3.4.8  # SSH key handling
+
+# Development dependencies (install with pip install -e .[dev])
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# isort>=5.12.0
+# mypy>=1.0.0
+# pre-commit>=3.0.0
+# sphinx>=6.0.0
+# sphinx-rtd-theme>=1.2.0

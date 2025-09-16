@@ -1,0 +1,183 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ec2-dynamic-sync"
+version = "1.0.0"
+description = "Professional-grade EC2 file synchronization with dynamic IP handling, bidirectional sync, and real-time monitoring"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "EC2 Dynamic Sync Contributors", email = "ec2-dynamic-sync@example.com"}
+]
+maintainers = [
+    {name = "EC2 Dynamic Sync Contributors", email = "ec2-dynamic-sync@example.com"}
+]
+keywords = [
+    "aws", "ec2", "sync", "rsync", "cloud", "automation", 
+    "devops", "file-sync", "remote-sync", "dynamic-ip"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+    "Topic :: System :: Networking",
+    "Environment :: Console",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "boto3>=1.26.0",
+    "PyYAML>=6.0",
+    "watchdog>=3.0.0",
+    "click>=8.0.0",
+    "rich>=12.0.0",
+    "colorama>=0.4.6",
+    "tqdm>=4.64.0",
+    "pydantic>=2.0.0",
+    "packaging>=21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "black>=22.0.0",
+    "isort>=5.10.0",
+    "flake8>=5.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=2.20.0",
+    "twine>=4.0.0",
+    "build>=0.8.0",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "moto>=4.0.0",
+    "responses>=0.20.0",
+]
+docs = [
+    "mkdocs>=1.4.0",
+    "mkdocs-material>=8.5.0",
+    "mkdocs-click>=0.8.0",
+    "mkdocstrings[python]>=0.19.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ec2-dynamic-sync/ec2-dynamic-sync"
+Documentation = "https://ec2-dynamic-sync.readthedocs.io"
+Repository = "https://github.com/ec2-dynamic-sync/ec2-dynamic-sync"
+"Bug Tracker" = "https://github.com/ec2-dynamic-sync/ec2-dynamic-sync/issues"
+Changelog = "https://github.com/ec2-dynamic-sync/ec2-dynamic-sync/blob/main/CHANGELOG.md"
+
+[project.scripts]
+ec2-sync = "ec2_dynamic_sync.cli.main:main"
+ec2-sync-setup = "ec2_dynamic_sync.cli.setup:main"
+ec2-sync-watch = "ec2_dynamic_sync.cli.watch:main"
+ec2-sync-doctor = "ec2_dynamic_sync.cli.doctor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ec2_dynamic_sync = [
+    "templates/*.yaml",
+    "templates/*.yml",
+    "templates/*.json",
+    "schemas/*.json",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["ec2_dynamic_sync"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "boto3.*",
+    "botocore.*",
+    "watchdog.*",
+    "yaml.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "aws: marks tests that require AWS credentials",
+]
+
+[tool.coverage.run]
+source = ["src/ec2_dynamic_sync"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
