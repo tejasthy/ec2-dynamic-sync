@@ -42,7 +42,7 @@ from .__version__ import (
 )
 
 # Core components
-from .core.orchestrator import SyncOrchestrator
+from .core.sync_orchestrator import SyncOrchestrator
 from .core.aws_manager import AWSManager
 from .core.ssh_manager import SSHManager
 from .core.rsync_manager import RsyncManager

@@ -1,0 +1,28 @@
+# Test configuration for EC2 Dynamic Sync
+project_name: "test-project"
+
+aws:
+  region: us-east-1
+  instance_id: i-1234567890abcdef0
+  auto_start_instance: false
+
+ssh:
+  user: ubuntu
+  key_file: ~/.ssh/id_rsa
+  port: 22
+
+directory_mappings:
+  - name: "test-mapping"
+    local_path: ~/test_local
+    remote_path: ~/test_remote
+    enabled: true
+
+sync_options:
+  archive: true
+  verbose: true
+  compress: true
+  progress: true
+
+conflict_resolution: newer
+max_retries: 3
+retry_delay: 5

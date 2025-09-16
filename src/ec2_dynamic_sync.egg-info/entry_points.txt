@@ -1,0 +1,5 @@
+[console_scripts]
+ec2-sync = ec2_dynamic_sync.cli.main:main
+ec2-sync-doctor = ec2_dynamic_sync.cli.doctor:main
+ec2-sync-setup = ec2_dynamic_sync.cli.setup:main
+ec2-sync-watch = ec2_dynamic_sync.cli.watch:main

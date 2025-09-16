@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 """
-Rsync Operations Manager for EC2 Dynamic Sync.
+Rsync Operations Manager for LightSheetV2 Sync System
 
 This module handles all rsync operations including:
 - Bidirectional synchronization
@@ -12,26 +13,18 @@ import subprocess
 import time
 import logging
 import os
-import re
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
-
-from .models import SyncConfig, SyncOptions, SyncResult, SyncStats, DirectoryMapping, ConflictResolution
-from .exceptions import SyncError, SSHConnectionError
-from .ssh_manager import SSHManager
+import re
 
 
 class RsyncManager:
     """Manages rsync operations for file synchronization."""
     
-    def __init__(self, sync_config: SyncConfig, ssh_manager: SSHManager):
-        """Initialize rsync manager with configuration.
-        
-        Args:
-            sync_config: Sync configuration object
-            ssh_manager: SSH manager instance
-        """
-        self.config = sync_config
+    def __init__(self, config: Dict[str, Any], ssh_manager):
+        """Initialize rsync manager with configuration."""
+        self.config = config
+        self.sync_config = config['sync']
         self.ssh_manager = ssh_manager
         self.logger = logging.getLogger(__name__)
         
@@ -43,341 +36,375 @@ class RsyncManager:
         options = ['rsync']
         
         # Basic flags
-        if self.config.sync_options.archive:
+        if self.sync_config['options'].get('archive', True):
             options.append('-a')
-        if self.config.sync_options.verbose:
+        if self.sync_config['options'].get('verbose', True):
             options.append('-v')
-        if self.config.sync_options.compress:
+        if self.sync_config['options'].get('compress', True):
             options.append('-z')
-        if self.config.sync_options.progress:
+        if self.sync_config['options'].get('progress', True):
             options.append('--progress')
-        if self.config.sync_options.partial:
+        if self.sync_config['options'].get('partial', True):
             options.append('--partial')
-        if self.config.sync_options.delete:
+        if self.sync_config['options'].get('delete', False):
             options.append('--delete')
+        if self.sync_config['options'].get('dry_run', False):
+            options.append('--dry-run')
+        if self.sync_config['options'].get('backup', False):
+            options.append('--backup')
         
         # Bandwidth limit
-        if self.config.sync_options.bandwidth_limit:
-            options.extend(['--bwlimit', str(self.config.sync_options.bandwidth_limit)])
+        bw_limit = self.sync_config['options'].get('bandwidth_limit')
+        if bw_limit:
+            options.extend(['--bwlimit', str(bw_limit)])
         
         # Exclude patterns
-        for pattern in self.config.sync_options.exclude_patterns:
+        exclude_patterns = self.sync_config['options'].get('exclude_patterns', [])
+        for pattern in exclude_patterns:
             options.extend(['--exclude', pattern])
         
-        # Include patterns
-        for pattern in self.config.sync_options.include_patterns:
-            options.extend(['--include', pattern])
-        
-        # Additional options
-        if self.config.sync_options.checksum:
-            options.append('--checksum')
-        if self.config.sync_options.update:
-            options.append('--update')
-        if self.config.sync_options.ignore_existing:
-            options.append('--ignore-existing')
-        
-        # SSH configuration
+        # SSH command
         ssh_cmd = self.ssh_manager.build_rsync_ssh_command()
         options.extend(['-e', ssh_cmd])
         
         return options
     
     def _expand_path(self, path: str) -> str:
-        """Expand user home directory and environment variables in path."""
-        return os.path.expanduser(os.path.expandvars(path))
+        """Expand user home directory in path."""
+        return os.path.expanduser(path)
     
-    def _parse_rsync_output(self, output: str) -> SyncStats:
-        """Parse rsync output to extract statistics."""
-        stats = SyncStats()
-        
-        # Parse file transfer information
-        file_pattern = r'(\d+) files transferred'
-        match = re.search(file_pattern, output)
-        if match:
-            stats.files_transferred = int(match.group(1))
-        
-        # Parse bytes transferred
-        bytes_pattern = r'sent (\d+) bytes\s+received (\d+) bytes'
-        match = re.search(bytes_pattern, output)
-        if match:
-            stats.bytes_sent = int(match.group(1))
-            stats.bytes_received = int(match.group(2))
-            stats.total_bytes = stats.bytes_sent + stats.bytes_received
-        
-        # Parse transfer rate
-        rate_pattern = r'(\d+(?:\.\d+)?)\s+bytes/sec'
-        match = re.search(rate_pattern, output)
-        if match:
-            stats.transfer_rate = float(match.group(1))
-        
-        # Parse speedup
-        speedup_pattern = r'total size is (\d+)\s+speedup is (\d+(?:\.\d+)?)'
-        match = re.search(speedup_pattern, output)
-        if match:
-            stats.total_size = int(match.group(1))
-            stats.speedup = float(match.group(2))
-        
-        return stats
+    def _build_local_path(self, sync_dir: str) -> str:
+        """Build full local path for sync directory."""
+        base_dir = self._expand_path(self.sync_config['local']['base_dir'])
+        return os.path.join(base_dir, sync_dir)
     
-    def _run_rsync_command(self, cmd: List[str], timeout: int = 3600) -> SyncResult:
-        """Run rsync command and return results."""
-        start_time = time.time()
-        
-        try:
-            self.logger.debug(f"Running rsync command: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-            
-            duration = time.time() - start_time
-            
-            # Parse output for statistics
-            stats = self._parse_rsync_output(result.stdout + result.stderr)
-            stats.duration = duration
-            
-            return SyncResult(
-                success=result.returncode == 0,
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                stats=stats,
-                command=' '.join(cmd)
-            )
-            
-        except subprocess.TimeoutExpired:
-            duration = time.time() - start_time
-            self.logger.error(f"Rsync command timed out after {timeout}s")
-            
-            return SyncResult(
-                success=False,
-                returncode=-1,
-                stdout='',
-                stderr=f'Command timed out after {timeout}s',
-                stats=SyncStats(duration=duration),
-                command=' '.join(cmd)
-            )
-            
-        except FileNotFoundError:
-            self.logger.error("rsync command not found. Please install rsync.")
-            
-            return SyncResult(
-                success=False,
-                returncode=-1,
-                stdout='',
-                stderr='rsync command not found',
-                stats=SyncStats(),
-                command=' '.join(cmd)
-            )
-            
-        except Exception as e:
-            duration = time.time() - start_time
-            self.logger.error(f"Rsync command failed: {e}")
-            
-            return SyncResult(
-                success=False,
-                returncode=-1,
-                stdout='',
-                stderr=str(e),
-                stats=SyncStats(duration=duration),
-                command=' '.join(cmd)
-            )
+    def _build_remote_path(self, host: str, sync_dir: str) -> str:
+        """Build full remote path for sync directory."""
+        user = self.ssh_manager.ssh_config['user']
+        base_dir = self.sync_config['remote']['base_dir']
+        remote_path = f"{base_dir}/{sync_dir}"
+        return f"{user}@{host}:{remote_path}"
     
-    def sync_directory(self, mapping: DirectoryMapping, host: str, 
-                      direction: str = 'bidirectional', dry_run: bool = False) -> Dict[str, Any]:
-        """Sync a single directory mapping."""
-        if not mapping.enabled:
-            return {
-                'success': True,
-                'skipped': True,
-                'reason': 'Directory mapping is disabled'
+    def check_local_directory(self, sync_dir: str) -> bool:
+        """Check if local sync directory exists."""
+        local_path = self._build_local_path(sync_dir)
+        exists = os.path.exists(local_path)
+        
+        if not exists:
+            self.logger.info(f"Creating local directory: {local_path}")
+            try:
+                os.makedirs(local_path, exist_ok=True)
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to create local directory {local_path}: {e}")
+                return False
+        
+        return True
+    
+    def check_remote_directory(self, host: str, sync_dir: str) -> bool:
+        """Check if remote sync directory exists."""
+        base_dir = self.sync_config['remote']['base_dir']
+        remote_dir = f"{base_dir}/{sync_dir}"
+        
+        if not self.ssh_manager.check_remote_directory(host, remote_dir):
+            self.logger.info(f"Creating remote directory: {remote_dir}")
+            return self.ssh_manager.create_remote_directory(host, remote_dir)
+        
+        return True
+    
+    def get_directory_info(self, host: str, sync_dir: str) -> Dict[str, Any]:
+        """Get information about local and remote directories."""
+        local_path = self._build_local_path(sync_dir)
+        base_dir = self.sync_config['remote']['base_dir']
+        remote_dir = f"{base_dir}/{sync_dir}"
+        
+        info = {
+            'sync_dir': sync_dir,
+            'local': {
+                'path': local_path,
+                'exists': os.path.exists(local_path),
+                'size': None,
+                'file_count': None
+            },
+            'remote': {
+                'path': remote_dir,
+                'exists': False,
+                'size': None,
+                'file_count': None
             }
-        
-        local_path = self._expand_path(mapping.local_path)
-        remote_path = mapping.remote_path
-        user_host = f"{self.ssh_manager.config.user}@{host}"
-        
-        results = {
-            'mapping_name': mapping.name,
-            'local_path': local_path,
-            'remote_path': remote_path,
-            'direction': direction,
-            'dry_run': dry_run,
-            'success': True,
-            'overall_success': True
         }
         
-        try:
-            # Ensure local directory exists
-            if not os.path.exists(local_path):
-                if direction in ['local_to_remote', 'bidirectional']:
-                    self.logger.info(f"Creating local directory: {local_path}")
-                    os.makedirs(local_path, exist_ok=True)
-                else:
-                    self.logger.warning(f"Local directory does not exist: {local_path}")
-            
-            # Ensure remote directory exists
-            if not self.ssh_manager.check_remote_directory(host, remote_path):
-                if direction in ['remote_to_local', 'bidirectional']:
-                    self.logger.info(f"Creating remote directory: {remote_path}")
-                    if not self.ssh_manager.create_remote_directory(host, remote_path):
-                        raise SyncError(f"Failed to create remote directory: {remote_path}")
-                else:
-                    self.logger.warning(f"Remote directory does not exist: {remote_path}")
-            
-            # Perform sync based on direction
-            if direction == 'local_to_remote':
-                results['local_to_remote'] = self._sync_local_to_remote(
-                    local_path, f"{user_host}:{remote_path}", dry_run
+        # Get local info
+        if info['local']['exists']:
+            try:
+                # Get local file count
+                result = subprocess.run(
+                    ['find', local_path, '-type', 'f'],
+                    capture_output=True, text=True
                 )
-                results['success'] = results['local_to_remote']['success']
+                if result.returncode == 0:
+                    info['local']['file_count'] = len(result.stdout.strip().split('\n')) if result.stdout.strip() else 0
                 
-            elif direction == 'remote_to_local':
-                results['remote_to_local'] = self._sync_remote_to_local(
-                    f"{user_host}:{remote_path}", local_path, dry_run
+                # Get local size
+                result = subprocess.run(
+                    ['du', '-sh', local_path],
+                    capture_output=True, text=True
                 )
-                results['success'] = results['remote_to_local']['success']
-                
-            elif direction == 'bidirectional':
-                # Handle bidirectional sync with conflict resolution
-                results.update(self._sync_bidirectional(
-                    local_path, f"{user_host}:{remote_path}", dry_run
-                ))
-                results['success'] = results.get('overall_success', False)
-            
-            else:
-                raise SyncError(f"Invalid sync direction: {direction}")
-            
-            results['overall_success'] = results['success']
-            
-        except Exception as e:
-            self.logger.error(f"Sync failed for {mapping.name}: {e}")
-            results.update({
-                'success': False,
-                'overall_success': False,
-                'error': str(e)
-            })
+                if result.returncode == 0:
+                    info['local']['size'] = result.stdout.split('\t')[0]
+            except Exception as e:
+                self.logger.debug(f"Could not get local directory info: {e}")
         
-        return results
-    
-    def _sync_local_to_remote(self, local_path: str, remote_path: str, dry_run: bool) -> Dict[str, Any]:
-        """Sync from local to remote."""
+        # Get remote info
+        info['remote']['exists'] = self.ssh_manager.check_remote_directory(host, remote_dir)
+        if info['remote']['exists']:
+            size_info = self.ssh_manager.get_remote_disk_usage(host, remote_dir)
+            if size_info:
+                info['remote']['size'] = size_info['size']
+            
+            file_count = self.ssh_manager.get_remote_file_count(host, remote_dir)
+            if file_count is not None:
+                info['remote']['file_count'] = file_count
+        
+        return info
+
+    def sync_local_to_remote(self, host: str, sync_dir: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Sync local directory to remote."""
+        local_path = self._build_local_path(sync_dir)
+        remote_path = self._build_remote_path(host, sync_dir)
+
+        # Ensure directories exist
+        if not self.check_local_directory(sync_dir):
+            return {'success': False, 'error': 'Local directory check failed'}
+
+        if not self.check_remote_directory(host, sync_dir):
+            return {'success': False, 'error': 'Remote directory check failed'}
+
+        # Build rsync command
         cmd = self.base_rsync_options.copy()
-        
+
         if dry_run:
             cmd.append('--dry-run')
-        
-        # Ensure trailing slash for directory sync
+
+        # Add trailing slash to source for directory contents sync
         if not local_path.endswith('/'):
             local_path += '/'
-        
+
         cmd.extend([local_path, remote_path])
-        
-        result = self._run_rsync_command(cmd)
-        
-        return {
-            'success': result.success,
-            'returncode': result.returncode,
-            'stdout': result.stdout,
-            'stderr': result.stderr,
-            'stats': result.stats.dict(),
-            'command': result.command
-        }
-    
-    def _sync_remote_to_local(self, remote_path: str, local_path: str, dry_run: bool) -> Dict[str, Any]:
-        """Sync from remote to local."""
+
+        return self._execute_rsync(cmd, f"local-to-remote sync of {sync_dir}")
+
+    def sync_remote_to_local(self, host: str, sync_dir: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Sync remote directory to local."""
+        local_path = self._build_local_path(sync_dir)
+        remote_path = self._build_remote_path(host, sync_dir)
+
+        # Ensure directories exist
+        if not self.check_local_directory(sync_dir):
+            return {'success': False, 'error': 'Local directory check failed'}
+
+        if not self.check_remote_directory(host, sync_dir):
+            return {'success': False, 'error': 'Remote directory check failed'}
+
+        # Build rsync command
         cmd = self.base_rsync_options.copy()
-        
+
         if dry_run:
             cmd.append('--dry-run')
-        
-        # Ensure trailing slash for directory sync
+
+        # Add trailing slash to source for directory contents sync
         if not remote_path.endswith('/'):
             remote_path += '/'
-        
+
         cmd.extend([remote_path, local_path])
-        
-        result = self._run_rsync_command(cmd)
-        
-        return {
-            'success': result.success,
-            'returncode': result.returncode,
-            'stdout': result.stdout,
-            'stderr': result.stderr,
-            'stats': result.stats.dict(),
-            'command': result.command
-        }
-    
-    def _sync_bidirectional(self, local_path: str, remote_path: str, dry_run: bool) -> Dict[str, Any]:
+
+        return self._execute_rsync(cmd, f"remote-to-local sync of {sync_dir}")
+
+    def sync_bidirectional(self, host: str, sync_dir: str, dry_run: bool = False) -> Dict[str, Any]:
         """Perform bidirectional sync with conflict resolution."""
+        conflict_resolution = self.config['modes']['bidirectional'].get('conflict_resolution', 'newer')
+
+        self.logger.info(f"Starting bidirectional sync of {sync_dir} (conflict resolution: {conflict_resolution})")
+
         results = {
+            'sync_dir': sync_dir,
             'local_to_remote': None,
             'remote_to_local': None,
+            'conflicts_detected': False,
             'overall_success': False
         }
-        
-        # Determine sync order based on conflict resolution strategy
-        if self.config.conflict_resolution == ConflictResolution.LOCAL:
-            # Local takes precedence - sync local to remote only
-            results['local_to_remote'] = self._sync_local_to_remote(local_path, remote_path, dry_run)
-            results['overall_success'] = results['local_to_remote']['success']
-            
-        elif self.config.conflict_resolution == ConflictResolution.REMOTE:
-            # Remote takes precedence - sync remote to local only
-            results['remote_to_local'] = self._sync_remote_to_local(remote_path, local_path, dry_run)
-            results['overall_success'] = results['remote_to_local']['success']
-            
-        elif self.config.conflict_resolution == ConflictResolution.NEWER:
-            # Sync both directions, newer files win
-            # First sync remote to local with --update flag
-            cmd_r2l = self.base_rsync_options.copy()
+
+        if conflict_resolution == 'newer':
+            # Use rsync's --update flag to only transfer newer files
+            cmd_base = self.base_rsync_options.copy()
+            cmd_base.append('--update')  # Only transfer files that are newer
+
             if dry_run:
-                cmd_r2l.append('--dry-run')
-            cmd_r2l.append('--update')
-            
-            remote_path_slash = remote_path if remote_path.endswith('/') else remote_path + '/'
-            cmd_r2l.extend([remote_path_slash, local_path])
-            
-            result_r2l = self._run_rsync_command(cmd_r2l)
-            results['remote_to_local'] = {
-                'success': result_r2l.success,
-                'returncode': result_r2l.returncode,
-                'stdout': result_r2l.stdout,
-                'stderr': result_r2l.stderr,
-                'stats': result_r2l.stats.dict(),
-                'command': result_r2l.command
-            }
-            
-            # Then sync local to remote with --update flag
-            cmd_l2r = self.base_rsync_options.copy()
-            if dry_run:
-                cmd_l2r.append('--dry-run')
-            cmd_l2r.append('--update')
-            
-            local_path_slash = local_path if local_path.endswith('/') else local_path + '/'
-            cmd_l2r.extend([local_path_slash, remote_path])
-            
-            result_l2r = self._run_rsync_command(cmd_l2r)
-            results['local_to_remote'] = {
-                'success': result_l2r.success,
-                'returncode': result_l2r.returncode,
-                'stdout': result_l2r.stdout,
-                'stderr': result_l2r.stderr,
-                'stats': result_l2r.stats.dict(),
-                'command': result_l2r.command
-            }
-            
-            results['overall_success'] = (
-                results['remote_to_local']['success'] and 
-                results['local_to_remote']['success']
-            )
-            
+                cmd_base.append('--dry-run')
+
+            # Sync local to remote (newer files only)
+            local_path = self._build_local_path(sync_dir)
+            remote_path = self._build_remote_path(host, sync_dir)
+
+            if not local_path.endswith('/'):
+                local_path += '/'
+
+            cmd_l2r = cmd_base.copy()
+            cmd_l2r.extend([local_path, remote_path])
+            results['local_to_remote'] = self._execute_rsync(cmd_l2r, f"bidirectional L2R sync of {sync_dir}")
+
+            # Sync remote to local (newer files only)
+            if not remote_path.endswith('/'):
+                remote_path += '/'
+
+            cmd_r2l = cmd_base.copy()
+            cmd_r2l.extend([remote_path, local_path.rstrip('/')])
+            results['remote_to_local'] = self._execute_rsync(cmd_r2l, f"bidirectional R2L sync of {sync_dir}")
+
+        elif conflict_resolution == 'local':
+            # Local takes precedence
+            results['local_to_remote'] = self.sync_local_to_remote(host, sync_dir, dry_run)
+
+        elif conflict_resolution == 'remote':
+            # Remote takes precedence
+            results['remote_to_local'] = self.sync_remote_to_local(host, sync_dir, dry_run)
+
         else:
-            # Manual conflict resolution - report conflicts but don't sync
-            results['error'] = "Manual conflict resolution not implemented in dry-run mode"
-            results['overall_success'] = False
-        
+            return {'success': False, 'error': f'Unknown conflict resolution: {conflict_resolution}'}
+
+        # Determine overall success
+        if results['local_to_remote'] and results['remote_to_local']:
+            results['overall_success'] = (
+                results['local_to_remote']['success'] and
+                results['remote_to_local']['success']
+            )
+        elif results['local_to_remote']:
+            results['overall_success'] = results['local_to_remote']['success']
+        elif results['remote_to_local']:
+            results['overall_success'] = results['remote_to_local']['success']
+
         return results
+
+    def _execute_rsync(self, cmd: List[str], operation_name: str) -> Dict[str, Any]:
+        """Execute rsync command with error handling and progress monitoring."""
+        self.logger.info(f"Starting {operation_name}")
+        self.logger.debug(f"Rsync command: {' '.join(cmd)}")
+
+        start_time = time.time()
+
+        try:
+            # Execute rsync command
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            stdout_lines = []
+            stderr_lines = []
+
+            # Read output in real-time
+            while True:
+                stdout_line = process.stdout.readline()
+                stderr_line = process.stderr.readline()
+
+                if stdout_line:
+                    stdout_lines.append(stdout_line.rstrip())
+                    # Log progress information
+                    if 'to-chk=' in stdout_line or '%' in stdout_line:
+                        self.logger.debug(f"Progress: {stdout_line.rstrip()}")
+
+                if stderr_line:
+                    stderr_lines.append(stderr_line.rstrip())
+                    self.logger.warning(f"Rsync stderr: {stderr_line.rstrip()}")
+
+                if process.poll() is not None:
+                    break
+
+            # Get remaining output
+            remaining_stdout, remaining_stderr = process.communicate()
+            if remaining_stdout:
+                stdout_lines.extend(remaining_stdout.strip().split('\n'))
+            if remaining_stderr:
+                stderr_lines.extend(remaining_stderr.strip().split('\n'))
+
+            duration = time.time() - start_time
+
+            # Parse rsync output for statistics
+            stats = self._parse_rsync_output(stdout_lines)
+
+            result = {
+                'success': process.returncode == 0,
+                'returncode': process.returncode,
+                'duration': duration,
+                'operation': operation_name,
+                'stats': stats,
+                'stdout': '\n'.join(stdout_lines),
+                'stderr': '\n'.join(stderr_lines)
+            }
+
+            if result['success']:
+                self.logger.info(f"Completed {operation_name} in {duration:.1f}s")
+                if stats.get('files_transferred', 0) > 0:
+                    self.logger.info(f"Transferred {stats['files_transferred']} files, {stats.get('total_size', 'unknown')} bytes")
+            else:
+                self.logger.error(f"Failed {operation_name} (exit code {process.returncode})")
+                if stderr_lines:
+                    self.logger.error(f"Error output: {stderr_lines[-1]}")
+
+            return result
+
+        except Exception as e:
+            duration = time.time() - start_time
+            self.logger.error(f"Exception during {operation_name}: {e}")
+            return {
+                'success': False,
+                'returncode': -1,
+                'duration': duration,
+                'operation': operation_name,
+                'stats': {},
+                'stdout': '',
+                'stderr': str(e)
+            }
+
+    def _parse_rsync_output(self, output_lines: List[str]) -> Dict[str, Any]:
+        """Parse rsync output to extract statistics."""
+        stats = {
+            'files_transferred': 0,
+            'files_skipped': 0,
+            'total_size': 0,
+            'speedup': 0.0
+        }
+
+        for line in output_lines:
+            # Look for summary line like: "sent 1,234 bytes  received 5,678 bytes  2,345.67 bytes/sec"
+            if 'sent' in line and 'received' in line and 'bytes/sec' in line:
+                # Extract numbers from the line
+                numbers = re.findall(r'[\d,]+', line)
+                if len(numbers) >= 2:
+                    try:
+                        sent = int(numbers[0].replace(',', ''))
+                        received = int(numbers[1].replace(',', ''))
+                        stats['total_size'] = sent + received
+                    except ValueError:
+                        pass
+
+            # Look for speedup line
+            elif 'speedup is' in line:
+                match = re.search(r'speedup is ([\d.]+)', line)
+                if match:
+                    try:
+                        stats['speedup'] = float(match.group(1))
+                    except ValueError:
+                        pass
+
+            # Count file operations
+            elif line.startswith('>f') or line.startswith('<f'):
+                stats['files_transferred'] += 1
+            elif 'skipping' in line.lower():
+                stats['files_skipped'] += 1
+
+        return stats

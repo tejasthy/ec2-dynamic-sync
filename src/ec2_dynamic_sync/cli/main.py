@@ -18,7 +18,7 @@ from rich.text import Text
 
 from ..core import ConfigManager, SyncOrchestrator
 from ..core.exceptions import EC2SyncError, ConfigurationError
-from .._version import __version__
+from ..__version__ import __version__
 
 
 console = Console()
@@ -176,7 +176,7 @@ def status(ctx, output_json):
             task = progress.add_task("Getting sync status...", total=None)
             
             # Initialize orchestrator
-            orchestrator = SyncOrchestrator(
+            orchestrator = SyncOrchestrator.from_config_file(
                 config_path=ctx.obj['config_path'],
                 profile=ctx.obj['profile']
             )
@@ -221,7 +221,7 @@ def sync(ctx, output_json, dry_run):
             task = progress.add_task(action + "...", total=None)
             
             # Initialize orchestrator
-            orchestrator = SyncOrchestrator(
+            orchestrator = SyncOrchestrator.from_config_file(
                 config_path=ctx.obj['config_path'],
                 profile=ctx.obj['profile']
             )
@@ -271,7 +271,7 @@ def push(ctx, output_json, dry_run):
         ) as progress:
             task = progress.add_task(action + "...", total=None)
             
-            orchestrator = SyncOrchestrator(
+            orchestrator = SyncOrchestrator.from_config_file(
                 config_path=ctx.obj['config_path'],
                 profile=ctx.obj['profile']
             )
@@ -319,7 +319,7 @@ def pull(ctx, output_json, dry_run):
         ) as progress:
             task = progress.add_task(action + "...", total=None)
             
-            orchestrator = SyncOrchestrator(
+            orchestrator = SyncOrchestrator.from_config_file(
                 config_path=ctx.obj['config_path'],
                 profile=ctx.obj['profile']
             )

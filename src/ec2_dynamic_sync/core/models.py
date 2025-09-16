@@ -8,7 +8,7 @@ providing validation, serialization, and type safety.
 from typing import Optional, List, Dict, Any, Union
 from pathlib import Path
 from enum import Enum
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 import os
 
 
@@ -46,18 +46,16 @@ class AWSConfig(BaseModel):
     auto_start_instance: bool = Field(True, description="Auto-start stopped instances")
     max_wait_time: int = Field(600, description="Maximum wait time for instance operations")
     
-    @root_validator
-    def validate_instance_identification(cls, values):
+    @model_validator(mode='after')
+    def validate_instance_identification(self):
         """Ensure either instance_id or instance_name is provided."""
-        instance_id = values.get('instance_id')
-        instance_name = values.get('instance_name')
-        
-        if not instance_id and not instance_name:
+        if not self.instance_id and not self.instance_name:
             raise ValueError("Either instance_id or instance_name must be provided")
         
-        return values
+        return self
     
-    @validator('max_wait_time')
+    @field_validator('max_wait_time')
+    @classmethod
     def validate_max_wait_time(cls, v):
         """Validate max_wait_time is reasonable."""
         if v < 60 or v > 3600:
@@ -76,7 +74,8 @@ class SSHConfig(BaseModel):
     max_retries: int = Field(3, description="Maximum SSH retry attempts")
     retry_delay: int = Field(10, description="Delay between SSH retries")
     
-    @validator('key_file')
+    @field_validator('key_file')
+    @classmethod
     def validate_key_file(cls, v):
         """Validate SSH key file exists and has correct permissions."""
         expanded_path = os.path.expanduser(v)
@@ -94,7 +93,8 @@ class SSHConfig(BaseModel):
         
         return v
     
-    @validator('port')
+    @field_validator('port')
+    @classmethod
     def validate_port(cls, v):
         """Validate SSH port is in valid range."""
         if v < 1 or v > 65535:
@@ -111,7 +111,8 @@ class DirectoryMapping(BaseModel):
     enabled: bool = Field(True, description="Whether this mapping is enabled")
     exclude_patterns: List[str] = Field(default_factory=list, description="Patterns to exclude")
     
-    @validator('local_path')
+    @field_validator('local_path')
+    @classmethod
     def validate_local_path(cls, v):
         """Validate local path exists or can be created."""
         expanded_path = os.path.expanduser(v)
@@ -143,7 +144,8 @@ class SyncOptions(BaseModel):
         description="Global exclude patterns"
     )
     
-    @validator('bandwidth_limit')
+    @field_validator('bandwidth_limit')
+    @classmethod
     def validate_bandwidth_limit(cls, v):
         """Validate bandwidth limit format."""
         if v is not None and v.strip():
@@ -182,7 +184,8 @@ class SyncConfig(BaseModel):
     retry_delay: int = Field(30, description="Delay between retries")
     exponential_backoff: bool = Field(True, description="Use exponential backoff")
     
-    @validator('directory_mappings')
+    @field_validator('directory_mappings')
+    @classmethod
     def validate_directory_mappings(cls, v):
         """Ensure at least one directory mapping is provided."""
         if not v:

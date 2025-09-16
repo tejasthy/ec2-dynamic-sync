@@ -8,6 +8,8 @@ including AWS management, SSH connectivity, rsync operations, and configuration.
 from .aws_manager import AWSManager
 from .ssh_manager import SSHManager
 from .config_manager import ConfigManager
+from .rsync_manager import RsyncManager
+from .sync_orchestrator import SyncOrchestrator
 from .models import (
     SyncConfig,
     AWSConfig,
