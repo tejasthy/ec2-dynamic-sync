@@ -21,45 +21,45 @@ Example Usage:
     >>> print(f"Sync completed: {results['overall_success']}")
 
 CLI Usage:
-    $ ec2-sync init          # Interactive setup
+    $ ec2-sync-setup init    # Interactive setup
     $ ec2-sync status        # Check sync status
     $ ec2-sync sync          # Perform bidirectional sync
     $ ec2-sync push          # Local to remote sync
     $ ec2-sync pull          # Remote to local sync
-    $ ec2-sync watch         # Real-time monitoring
-    $ ec2-sync doctor        # Health check and diagnostics
+    $ ec2-sync-watch         # Real-time monitoring
+    $ ec2-sync-doctor        # Health check and diagnostics
 """
 
 from .__version__ import (
+    COMPATIBILITY,
+    FEATURES,
     __version__,
     __version_info__,
+    get_compatibility_info,
     get_version,
     get_version_info,
     is_feature_enabled,
-    get_compatibility_info,
-    FEATURES,
-    COMPATIBILITY,
 )
-
-# Core components
-from .core.sync_orchestrator import SyncOrchestrator
 from .core.aws_manager import AWSManager
-from .core.ssh_manager import SSHManager
-from .core.rsync_manager import RsyncManager
 from .core.config_manager import ConfigManager
 
 # Exceptions
 from .core.exceptions import (
-    EC2SyncError,
-    ConfigurationError,
     AWSConnectionError,
+    ConfigurationError,
+    EC2SyncError,
     SSHConnectionError,
     SyncError,
     ValidationError,
 )
 
 # Configuration and utilities
-from .core.models import SyncConfig, AWSConfig, SSHConfig, SyncResult
+from .core.models import AWSConfig, SSHConfig, SyncConfig, SyncResult
+from .core.rsync_manager import RsyncManager
+from .core.ssh_manager import SSHManager
+
+# Core components
+from .core.sync_orchestrator import SyncOrchestrator
 
 __all__ = [
     # Version information
@@ -71,25 +71,22 @@ __all__ = [
     "get_compatibility_info",
     "FEATURES",
     "COMPATIBILITY",
-    
     # Core classes
     "SyncOrchestrator",
-    "AWSManager", 
+    "AWSManager",
     "SSHManager",
     "RsyncManager",
     "ConfigManager",
-    
     # Exceptions
     "EC2SyncError",
     "ConfigurationError",
-    "AWSConnectionError", 
+    "AWSConnectionError",
     "SSHConnectionError",
     "SyncError",
     "ValidationError",
-    
     # Models
     "SyncConfig",
-    "AWSConfig", 
+    "AWSConfig",
     "SSHConfig",
     "SyncResult",
 ]
@@ -105,6 +102,7 @@ __copyright__ = "Copyright 2024 EC2 Dynamic Sync Contributors"
 
 # Compatibility check
 import sys
+
 from .__version__ import MINIMUM_PYTHON_VERSION
 
 if sys.version_info < MINIMUM_PYTHON_VERSION:

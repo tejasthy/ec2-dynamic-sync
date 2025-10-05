@@ -97,6 +97,67 @@ ec2-sync sync --dry-run
 
 # Use specific configuration file
 ec2-sync sync --config /path/to/config.yaml
+```
+
+### Setup and Configuration
+
+```bash
+# Interactive configuration wizard
+ec2-sync-setup init
+
+# Validate existing configuration
+ec2-sync-setup validate
+
+# Test connectivity to EC2 instance
+ec2-sync-setup test
+
+# Set up cron jobs for automatic sync
+ec2-sync-setup cron --schedule "*/15 * * * *"
+```
+
+### System Diagnostics
+
+```bash
+# Run comprehensive system diagnostics
+ec2-sync-doctor
+
+# Output diagnostics in JSON format
+ec2-sync-doctor --output json
+
+# Save diagnostic report to file
+ec2-sync-doctor --save-report report.yaml
+```
+
+### Real-time Monitoring
+
+```bash
+# Watch for file changes and auto-sync
+ec2-sync-watch
+
+# Configure sync delay and batch size
+ec2-sync-watch --delay 10 --batch-size 20
+
+# Run in background without UI
+ec2-sync-watch --no-ui
+```
+
+### Daemon Mode
+
+```bash
+# Start background sync daemon
+ec2-sync-daemon start
+
+# Check daemon status
+ec2-sync-daemon status
+
+# Stop daemon
+ec2-sync-daemon stop
+
+# Restart daemon
+ec2-sync-daemon restart
+
+# Run daemon in foreground with live status
+ec2-sync-daemon start --foreground
 
 # Use specific profile
 ec2-sync sync --profile production
@@ -148,7 +209,9 @@ conflict_resolution: "newer"  # newer, local, remote, manual
 
 ### AWS Permissions
 
-Your AWS credentials need the following EC2 permissions:
+Your AWS credentials need different EC2 permissions depending on your configuration:
+
+#### Full Permissions (when `auto_start_instance: true`)
 
 ```json
 {
@@ -158,6 +221,7 @@ Your AWS credentials need the following EC2 permissions:
             "Effect": "Allow",
             "Action": [
                 "ec2:DescribeInstances",
+                "ec2:DescribeRegions",
                 "ec2:StartInstances",
                 "ec2:StopInstances"
             ],
@@ -166,6 +230,35 @@ Your AWS credentials need the following EC2 permissions:
     ]
 }
 ```
+
+#### Read-Only Permissions (when `auto_start_instance: false`)
+
+If you don't want the tool to start/stop instances, use this minimal policy:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeRegions"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+```
+
+#### AWS Managed Policies
+
+Alternatively, you can use these AWS managed policies:
+
+- **`AmazonEC2FullAccess`** - Provides all EC2 permissions (includes more than needed)
+- **`AmazonEC2ReadOnlyAccess`** - Perfect for read-only mode (`auto_start_instance: false`)
+
+**Note**: When using read-only permissions, ensure your EC2 instances are running before attempting to sync, and set `auto_start_instance: false` in your configuration.
 
 ## 🔄 Automation
 

@@ -6,48 +6,62 @@ including AWS management, SSH connectivity, rsync operations, and configuration.
 """
 
 from .aws_manager import AWSManager
-from .ssh_manager import SSHManager
 from .config_manager import ConfigManager
-from .rsync_manager import RsyncManager
-from .sync_orchestrator import SyncOrchestrator
-from .models import (
-    SyncConfig,
-    AWSConfig,
-    SSHConfig,
-    DirectoryMapping,
-    SyncOptions,
-    SyncResult,
-    SyncStats,
-    DirectoryInfo,
-    SyncStatus,
-    ProfileConfig,
-    LoggingConfig,
-    ConflictResolution,
-    SyncMode,
-    LogLevel,
+from .enhanced_rsync import (
+    EnhancedRsyncManager,
+    ExcludePatternManager,
+    ProgressReporter,
 )
 from .exceptions import (
-    EC2SyncError,
-    ConfigurationError,
     AWSConnectionError,
+    ConfigurationError,
+    DependencyError,
+    EC2SyncError,
+    InstanceNotFoundError,
+    PermissionError,
     SSHConnectionError,
     SyncError,
     ValidationError,
-    InstanceNotFoundError,
-    PermissionError,
-    DependencyError,
 )
+from .models import (
+    AWSConfig,
+    ConflictResolution,
+    DirectoryInfo,
+    DirectoryMapping,
+    LoggingConfig,
+    LogLevel,
+    ProfileConfig,
+    SSHConfig,
+    SyncConfig,
+    SyncMode,
+    SyncOptions,
+    SyncResult,
+    SyncStats,
+    SyncStatus,
+)
+from .rsync_manager import RsyncManager
+from .ssh_manager import SSHManager
+from .sync_daemon import BidirectionalSyncDaemon, ChangeEvent, SyncState
+from .sync_orchestrator import SyncOrchestrator
 
 __all__ = [
     # Core managers
     "AWSManager",
-    "SSHManager", 
+    "SSHManager",
     "ConfigManager",
-    
+    "RsyncManager",
+    "SyncOrchestrator",
+    # Advanced sync components
+    "BidirectionalSyncDaemon",
+    "EnhancedRsyncManager",
+    "ExcludePatternManager",
+    "ProgressReporter",
+    "ChangeEvent",
+    "SyncState",
     # Models and data structures
     "SyncConfig",
     "AWSConfig",
-    "SSHConfig", 
+    "SSHConfig",
     "DirectoryMapping",
     "SyncOptions",
     "SyncResult",
@@ -56,17 +70,15 @@ __all__ = [
     "SyncStatus",
     "ProfileConfig",
     "LoggingConfig",
-    
     # Enums
     "ConflictResolution",
     "SyncMode",
     "LogLevel",
-    
     # Exceptions
     "EC2SyncError",
     "ConfigurationError",
     "AWSConnectionError",
-    "SSHConnectionError", 
+    "SSHConnectionError",
     "SyncError",
     "ValidationError",
     "InstanceNotFoundError",
