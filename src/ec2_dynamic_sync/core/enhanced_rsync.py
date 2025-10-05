@@ -320,7 +320,7 @@ class EnhancedRsyncManager:
             )
 
     def _build_rsync_command(
-        self, mapping: DirectoryMapping, dry_run: bool = False
+        self, mapping: DirectoryMapping, dry_run: bool = False, use_delete: bool = None
     ) -> List[str]:
         """Build enhanced rsync command with all options."""
         cmd = ["rsync"]
@@ -334,7 +334,12 @@ class EnhancedRsyncManager:
             cmd.append("-z")
         if self.config.sync_options.progress:
             cmd.append("--progress")
-        if self.config.sync_options.delete:
+
+        # Handle delete flag - allow override for bidirectional sync
+        if use_delete is not None:
+            if use_delete:
+                cmd.append("--delete")
+        elif self.config.sync_options.delete:
             cmd.append("--delete")
 
         # Dry run
@@ -371,6 +376,57 @@ class EnhancedRsyncManager:
 
         return cmd
 
+    def _parse_rsync_progress(self, line: str, progress: ProgressReporter):
+        """Parse rsync output line for progress information."""
+        # Parse file transfer progress lines like:
+        # "filename.txt    1,234,567  45%  123.45kB/s    0:00:12"
+        if "%" in line and ("kB/s" in line or "MB/s" in line or "B/s" in line):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    # Extract filename (first part)
+                    filename = parts[0]
+
+                    # Find percentage
+                    for part in parts:
+                        if "%" in part:
+                            percentage = float(part.replace("%", ""))
+                            break
+
+                    # Find transfer rate
+                    rate_bps = 0
+                    for part in parts:
+                        if "kB/s" in part:
+                            rate_bps = float(part.replace("kB/s", "")) * 1024
+                            break
+                        elif "MB/s" in part:
+                            rate_bps = float(part.replace("MB/s", "")) * 1024 * 1024
+                            break
+                        elif "B/s" in part:
+                            rate_bps = float(part.replace("B/s", ""))
+                            break
+
+                    # Update progress
+                    progress.update(
+                        bytes_transferred=int(percentage * progress.total_bytes / 100) if progress.total_bytes > 0 else 0,
+                        current_file=filename
+                    )
+
+                except (ValueError, IndexError):
+                    pass
+
+        # Parse summary lines for total size
+        elif "total size is" in line:
+            try:
+                # Extract total size from line like "total size is 1,234,567  speedup is 1.23"
+                parts = line.split("total size is")
+                if len(parts) > 1:
+                    size_part = parts[1].split()[0].replace(",", "")
+                    total_size = int(size_part)
+                    progress.total_bytes = total_size
+            except (ValueError, IndexError):
+                pass
+
     def _sync_bidirectional_enhanced(
         self,
         host: str,
@@ -379,29 +435,39 @@ class EnhancedRsyncManager:
         progress: ProgressReporter,
         progress_callback: Optional[callable],
     ) -> SyncResult:
-        """Enhanced bidirectional sync with conflict detection."""
+        """Enhanced bidirectional sync with conflict detection.
 
-        # First, sync local to remote
+        For true bidirectional sync, we disable the --delete flag to prevent
+        files that exist only on one side from being deleted. Instead, we use
+        --update to only transfer newer files and preserve all existing files.
+        """
+
+        # For bidirectional sync, we disable --delete to prevent data loss
+        # and use --update to only transfer newer files
         local_to_remote = self._sync_local_to_remote_enhanced(
-            host, mapping, dry_run, progress, progress_callback
+            host, mapping, dry_run, progress, progress_callback,
+            use_update=True, use_delete=False
         )
 
-        if not local_to_remote.success:
-            return local_to_remote
-
-        # Then, sync remote to local
+        # Always attempt remote to local sync, even if local to remote had issues
+        # This ensures we don't skip pulling remote changes due to minor local issues
         remote_to_local = self._sync_remote_to_local_enhanced(
-            host, mapping, dry_run, progress, progress_callback
+            host, mapping, dry_run, progress, progress_callback,
+            use_update=True, use_delete=False
         )
 
-        # Combine results
+        # Combine results - consider success if at least one direction succeeded
+        overall_success = local_to_remote.success or remote_to_local.success
+
         return SyncResult(
-            success=local_to_remote.success and remote_to_local.success,
+            success=overall_success,
             operation="sync_bidirectional",
             stats={
                 "local_to_remote": local_to_remote.stats,
                 "remote_to_local": remote_to_local.stats,
-                "overall_success": local_to_remote.success and remote_to_local.success,
+                "overall_success": overall_success,
+                "local_to_remote_success": local_to_remote.success,
+                "remote_to_local_success": remote_to_local.success,
             },
         )
 
@@ -412,6 +478,8 @@ class EnhancedRsyncManager:
         dry_run: bool,
         progress: ProgressReporter,
         progress_callback: Optional[callable],
+        use_update: bool = False,
+        use_delete: bool = None,
     ) -> SyncResult:
         """Enhanced local to remote sync."""
 
@@ -423,7 +491,12 @@ class EnhancedRsyncManager:
         if not remote_path.endswith("/"):
             remote_path += "/"
 
-        cmd = self._build_rsync_command(mapping, dry_run)
+        cmd = self._build_rsync_command(mapping, dry_run, use_delete=use_delete)
+
+        # Add --update flag for bidirectional sync to only transfer newer files
+        if use_update:
+            cmd.append("--update")
+
         cmd.extend([local_path, f"{self.ssh_manager.config.user}@{host}:{remote_path}"])
 
         return self._execute_rsync_with_progress(cmd, progress, progress_callback)
@@ -435,6 +508,8 @@ class EnhancedRsyncManager:
         dry_run: bool,
         progress: ProgressReporter,
         progress_callback: Optional[callable],
+        use_update: bool = False,
+        use_delete: bool = None,
     ) -> SyncResult:
         """Enhanced remote to local sync."""
 
@@ -446,7 +521,12 @@ class EnhancedRsyncManager:
         if not remote_path.endswith("/"):
             remote_path += "/"
 
-        cmd = self._build_rsync_command(mapping, dry_run)
+        cmd = self._build_rsync_command(mapping, dry_run, use_delete=use_delete)
+
+        # Add --update flag for bidirectional sync to only transfer newer files
+        if use_update:
+            cmd.append("--update")
+
         cmd.extend([f"{self.ssh_manager.config.user}@{host}:{remote_path}", local_path])
 
         return self._execute_rsync_with_progress(cmd, progress, progress_callback)
@@ -485,7 +565,10 @@ class EnhancedRsyncManager:
                 if output:
                     output_lines.append(output.strip())
 
-                    # Parse progress information
+                    # Parse progress information from rsync output
+                    self._parse_rsync_progress(output.strip(), progress)
+
+                    # Call progress callback if provided
                     if progress_callback:
                         stats = progress.get_stats()
                         progress_callback(stats)

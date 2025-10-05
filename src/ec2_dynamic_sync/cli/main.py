@@ -390,6 +390,11 @@ def pull(ctx, output_json, dry_run):
         sys.exit(1)
 
 
+# Import and register the watch command
+from .watch import watch
+cli.add_command(watch)
+
+
 def main():
     """Main entry point for the CLI."""
     try:

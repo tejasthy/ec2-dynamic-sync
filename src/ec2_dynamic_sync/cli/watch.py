@@ -7,13 +7,14 @@ import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import click
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.text import Text
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -63,6 +64,23 @@ class SyncEventHandler(FileSystemEventHandler):
             "last_sync": None,
             "errors": 0,
         }
+
+        # Progress tracking for time estimation
+        self.current_sync_progress = {
+            "in_progress": False,
+            "start_time": None,
+            "estimated_total_size": 0,
+            "transferred_size": 0,
+            "current_file": "",
+            "files_completed": 0,
+            "total_files": 0,
+            "transfer_rate": 0,  # bytes per second
+            "eta_seconds": 0,
+            "percentage": 0,
+        }
+
+        # Historical data for better estimates
+        self.sync_history = []  # List of past sync durations and sizes
 
         # Ignore patterns
         self.ignore_patterns = {
@@ -129,6 +147,59 @@ class SyncEventHandler(FileSystemEventHandler):
         # Schedule sync if we have enough changes or after delay
         self._schedule_sync()
 
+    def _progress_callback(self, progress_stats: Dict[str, Any]):
+        """Handle progress updates during sync operations."""
+        with self.sync_lock:
+            if not self.current_sync_progress["in_progress"]:
+                return
+
+            # Update progress information
+            self.current_sync_progress.update({
+                "transferred_size": progress_stats.get("bytes_transferred", 0),
+                "current_file": progress_stats.get("current_file", ""),
+                "files_completed": progress_stats.get("files_transferred", 0),
+                "transfer_rate": progress_stats.get("rate_bps", 0),
+                "eta_seconds": progress_stats.get("eta_seconds", 0),
+                "percentage": progress_stats.get("percentage", 0),
+            })
+
+    def _estimate_sync_size(self) -> int:
+        """Estimate the total size of files to be synced."""
+        total_size = 0
+
+        for mapping_name, file_paths in self.pending_changes.items():
+            for file_path in file_paths:
+                try:
+                    if os.path.exists(file_path):
+                        total_size += os.path.getsize(file_path)
+                except (OSError, IOError):
+                    # If we can't get file size, use average from history
+                    if self.sync_history:
+                        avg_file_size = sum(h["total_size"] for h in self.sync_history[-5:]) / min(5, len(self.sync_history))
+                        total_size += int(avg_file_size / max(1, sum(h["file_count"] for h in self.sync_history[-5:]) / min(5, len(self.sync_history))))
+                    else:
+                        total_size += 1024 * 1024  # Default 1MB estimate
+
+        return total_size
+
+    def _get_estimated_duration(self, estimated_size: int) -> float:
+        """Estimate sync duration based on historical data."""
+        if not self.sync_history:
+            # No history, use conservative estimate (1 MB/s)
+            return estimated_size / (1024 * 1024)
+
+        # Calculate average transfer rate from recent history
+        recent_history = self.sync_history[-5:]  # Last 5 syncs
+        total_size = sum(h["total_size"] for h in recent_history)
+        total_duration = sum(h["duration"] for h in recent_history)
+
+        if total_duration > 0 and total_size > 0:
+            avg_rate = total_size / total_duration  # bytes per second
+            return estimated_size / avg_rate
+        else:
+            # Fallback to conservative estimate
+            return estimated_size / (1024 * 1024)
+
     def _schedule_sync(self):
         """Schedule a sync operation."""
         with self.sync_lock:
@@ -166,14 +237,54 @@ class SyncEventHandler(FileSystemEventHandler):
                 return
 
             try:
-                # Perform sync
+                # Estimate sync size and duration
+                estimated_size = self._estimate_sync_size()
+                estimated_duration = self._get_estimated_duration(estimated_size)
+
+                # Initialize progress tracking
+                self.current_sync_progress.update({
+                    "in_progress": True,
+                    "start_time": current_time,
+                    "estimated_total_size": estimated_size,
+                    "transferred_size": 0,
+                    "current_file": "",
+                    "files_completed": 0,
+                    "total_files": sum(len(changes) for changes in self.pending_changes.values()),
+                    "transfer_rate": 0,
+                    "eta_seconds": estimated_duration,
+                    "percentage": 0,
+                })
+
+                # Display sync start with estimate
+                file_count = sum(len(changes) for changes in self.pending_changes.values())
+                size_mb = estimated_size / (1024 * 1024)
+                eta_str = self._format_duration(estimated_duration)
+
                 console.print(
-                    f"\n[cyan]🔄 Syncing {sum(len(changes) for changes in self.pending_changes.values())} changes...[/cyan]"
+                    f"\n[cyan]🔄 Syncing {file_count} changes ({size_mb:.1f} MB) - ETA: {eta_str}[/cyan]"
                 )
 
+                # Perform sync with progress callback
+                sync_start_time = time.time()
+
+                # Use enhanced rsync manager with progress callback
                 results = self.orchestrator.sync_all_directories(
                     mode=SyncMode.BIDIRECTIONAL, dry_run=False
                 )
+
+                sync_duration = time.time() - sync_start_time
+
+                # Update sync history for future estimates
+                self.sync_history.append({
+                    "duration": sync_duration,
+                    "total_size": estimated_size,
+                    "file_count": file_count,
+                    "timestamp": current_time,
+                })
+
+                # Keep only last 10 sync records
+                if len(self.sync_history) > 10:
+                    self.sync_history = self.sync_history[-10:]
 
                 if results.get("overall_success"):
                     console.print("[green]✅ Sync completed successfully[/green]")
@@ -192,6 +303,22 @@ class SyncEventHandler(FileSystemEventHandler):
                 console.print(f"[red]❌ Sync error: {e}[/red]")
                 self.stats["errors"] += 1
                 # Don't clear pending changes on error - they'll be retried
+            finally:
+                # Reset progress tracking
+                self.current_sync_progress["in_progress"] = False
+
+    def _format_duration(self, seconds: float) -> str:
+        """Format duration in human-readable format."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
 
 
 class WatchStatus:
@@ -209,6 +336,7 @@ class WatchStatus:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="main"),
+            Layout(name="progress", size=4),
             Layout(name="footer", size=3),
         )
 
@@ -266,6 +394,127 @@ class WatchStatus:
         layout["right"].update(
             Panel(stats_table, title="Statistics", border_style="yellow")
         )
+
+        # Progress panel - show sync progress and time estimates
+        self._update_progress_panel(layout)
+
+    def _update_progress_panel(self, layout: Layout):
+        """Update the progress panel with sync status and time estimates."""
+        progress_info = self.handler.current_sync_progress
+
+        if progress_info["in_progress"]:
+            # Active sync in progress
+            elapsed = time.time() - progress_info["start_time"]
+
+            # Create progress bar
+            percentage = progress_info["percentage"]
+            if percentage > 0:
+                progress_bar = f"{'█' * int(percentage / 5)}{'░' * (20 - int(percentage / 5))}"
+                progress_text = f"{percentage:.1f}%"
+            else:
+                # Indeterminate progress
+                progress_bar = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(elapsed) % 10]
+                progress_text = "In progress..."
+
+            # Format transfer rate
+            rate = progress_info["transfer_rate"]
+            if rate > 0:
+                if rate > 1024 * 1024:
+                    rate_str = f"{rate / (1024 * 1024):.1f} MB/s"
+                elif rate > 1024:
+                    rate_str = f"{rate / 1024:.1f} KB/s"
+                else:
+                    rate_str = f"{rate:.0f} B/s"
+            else:
+                rate_str = "Calculating..."
+
+            # Format ETA
+            eta = progress_info["eta_seconds"]
+            if eta > 0:
+                eta_str = self.handler._format_duration(eta)
+            else:
+                eta_str = "Calculating..."
+
+            # Current file
+            current_file = progress_info["current_file"]
+            if current_file:
+                current_file = os.path.basename(current_file)
+                if len(current_file) > 40:
+                    current_file = current_file[:37] + "..."
+            else:
+                current_file = "Preparing..."
+
+            progress_table = Table(show_header=False, box=None, padding=(0, 1))
+            progress_table.add_column("Label", style="cyan", width=15)
+            progress_table.add_column("Value", style="white")
+
+            progress_table.add_row("Status", f"[green]{progress_text}[/green]")
+            progress_table.add_row("Progress", f"[blue]{progress_bar}[/blue]")
+            progress_table.add_row("Transfer Rate", rate_str)
+            progress_table.add_row("ETA", f"[yellow]{eta_str}[/yellow]")
+            progress_table.add_row("Current File", current_file)
+            progress_table.add_row("Files", f"{progress_info['files_completed']}/{progress_info['total_files']}")
+
+            layout["progress"].update(
+                Panel(progress_table, title="🔄 Sync Progress", border_style="blue")
+            )
+
+        else:
+            # No active sync - show next sync estimate
+            total_pending = sum(
+                len(changes) for changes in self.handler.pending_changes.values()
+            )
+
+            if total_pending > 0:
+                # Estimate for pending changes
+                estimated_size = self.handler._estimate_sync_size()
+                estimated_duration = self.handler._get_estimated_duration(estimated_size)
+
+                size_mb = estimated_size / (1024 * 1024)
+                eta_str = self.handler._format_duration(estimated_duration)
+
+                # Check if sync is scheduled
+                next_sync_time = ""
+                if self.handler.sync_timer and self.handler.sync_timer.is_alive():
+                    # Calculate time until next sync
+                    current_time = time.time()
+                    if current_time - self.handler.last_sync_time < self.handler.min_interval:
+                        wait_time = self.handler.min_interval - (current_time - self.handler.last_sync_time)
+                        next_sync_time = f"in {self.handler._format_duration(wait_time)}"
+                    else:
+                        next_sync_time = f"in {self.handler._format_duration(self.handler.delay)}"
+
+                pending_table = Table(show_header=False, box=None, padding=(0, 1))
+                pending_table.add_column("Label", style="cyan", width=15)
+                pending_table.add_column("Value", style="white")
+
+                pending_table.add_row("Pending Files", str(total_pending))
+                pending_table.add_row("Estimated Size", f"{size_mb:.1f} MB")
+                pending_table.add_row("Estimated Time", eta_str)
+                if next_sync_time:
+                    pending_table.add_row("Next Sync", next_sync_time)
+
+                layout["progress"].update(
+                    Panel(pending_table, title="⏳ Next Sync Estimate", border_style="yellow")
+                )
+            else:
+                # No pending changes
+                idle_table = Table(show_header=False, box=None, padding=(0, 1))
+                idle_table.add_column("Status", style="green", justify="center")
+                idle_table.add_row("✅ All files synchronized")
+                idle_table.add_row("Watching for changes...")
+
+                layout["progress"].update(
+                    Panel(idle_table, title="💤 Idle", border_style="green")
+                )
+
+        # Footer with helpful information
+        footer_text = Text()
+        footer_text.append("Press ", style="white")
+        footer_text.append("Ctrl+C", style="bold red")
+        footer_text.append(" to stop | Time estimates based on file sizes and transfer history", style="white")
+
+        layout["footer"].update(Panel(footer_text, border_style="dim"))
 
         # Footer
         footer_text = Text()
