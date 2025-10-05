@@ -52,8 +52,14 @@ class SyncOrchestrator:
         try:
             self.logger.info("Preparing EC2 instance for sync...")
 
+            # First get the instance ID from configuration
+            instance_id = self.aws_manager.get_instance_id()
+            if not instance_id:
+                self.logger.error("Failed to resolve instance ID from configuration")
+                return False
+
             # Get instance information
-            instance_info = self.aws_manager.get_instance_info()
+            instance_info = self.aws_manager.get_instance_info(instance_id)
             if not instance_info:
                 self.logger.error("Failed to get instance information")
                 return False
@@ -69,12 +75,12 @@ class SyncOrchestrator:
             if instance_state != "running":
                 if self.config.aws.auto_start_instance:
                     self.logger.info("Starting EC2 instance...")
-                    if not self.aws_manager.start_instance():
+                    if not self.aws_manager.start_instance(instance_id):
                         self.logger.error("Failed to start instance")
                         return False
 
                     # Wait for instance to be running
-                    if not self.aws_manager.wait_for_instance_running():
+                    if not self.aws_manager.wait_for_state(instance_id, "running"):
                         self.logger.error("Instance failed to reach running state")
                         return False
                 else:
@@ -84,7 +90,7 @@ class SyncOrchestrator:
                     return False
 
             # Get current IP address
-            self.current_host = self.aws_manager.get_instance_ip()
+            self.current_host = self.aws_manager.get_public_ip(instance_id)
             if not self.current_host:
                 self.logger.error("Failed to get instance IP address")
                 return False
@@ -92,7 +98,7 @@ class SyncOrchestrator:
             self.logger.info(f"Instance IP: {self.current_host}")
 
             # Test SSH connectivity
-            if not self.ssh_manager.test_connectivity(self.current_host):
+            if not self.ssh_manager.test_connection(self.current_host):
                 self.logger.error("SSH connectivity test failed")
                 return False
 
@@ -209,16 +215,25 @@ class SyncOrchestrator:
 
         try:
             # Test AWS connectivity
-            instance_info = self.aws_manager.get_instance_info()
+            # First get the instance ID from configuration
+            instance_id = self.aws_manager.get_instance_id()
+            if not instance_id:
+                results["error"] = "Failed to resolve instance ID from configuration"
+                return results
+
+            instance_info = self.aws_manager.get_instance_info(instance_id)
             if instance_info:
                 results["aws_connectivity"] = True
                 results["instance_reachable"] = True
 
+                # Set instance_id for display purposes (same as prepare_instance does)
+                self.instance_id = instance_info["instance_id"]
+
                 # Get IP and test SSH
-                ip = self.aws_manager.get_instance_ip()
+                ip = self.aws_manager.get_public_ip(instance_id)
                 if ip:
                     self.current_host = ip
-                    if self.ssh_manager.test_connectivity(ip):
+                    if self.ssh_manager.test_connection(ip):
                         results["ssh_connectivity"] = True
                         results["overall_success"] = True
 

@@ -7,6 +7,7 @@ colorama>=0.4.6
 tqdm>=4.64.0
 pydantic>=2.0.0
 packaging>=21.0
+psutil>=5.9.0
 
 [dev]
 pytest>=7.0.0

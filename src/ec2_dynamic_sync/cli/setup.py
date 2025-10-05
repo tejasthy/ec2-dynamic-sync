@@ -543,7 +543,14 @@ def test(config: Optional[str]):
 
             # Test AWS connectivity
             try:
-                instance_info = orchestrator.aws_manager.get_instance_info()
+                # First get the instance ID from configuration
+                instance_id = orchestrator.aws_manager.get_instance_id()
+                if not instance_id:
+                    console.print("[red]❌ Failed to resolve instance ID from configuration[/red]")
+                    sys.exit(1)
+
+                # Then get instance information
+                instance_info = orchestrator.aws_manager.get_instance_info(instance_id)
                 if instance_info:
                     console.print(f"[green]✅ AWS connectivity successful[/green]")
                     console.print(

@@ -104,7 +104,7 @@ class SyncEventHandler(FileSystemEventHandler):
                 return True
 
         # Ignore hidden files and directories (starting with .)
-        if any(part.name.startswith(".") for part in path_obj.parts):
+        if any(part.startswith(".") for part in path_obj.parts):
             return True
 
         return False

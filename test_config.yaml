@@ -8,7 +8,7 @@ aws:
 
 ssh:
   user: ubuntu
-  key_file: ~/.ssh/id_rsa
+  key_file: ~/.ssh/sonofanton2.0.pem
   port: 22
 
 directory_mappings:
