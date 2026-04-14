@@ -8,12 +8,23 @@ with comprehensive error handling, progress reporting, and user-friendly output.
 import json
 import logging
 import sys
-from typing import Optional
+import threading
+import time
+from typing import Any, Dict, Optional
 
 import click
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -22,6 +33,136 @@ from ..core import ConfigManager, SyncOrchestrator
 from ..core.exceptions import ConfigurationError, EC2SyncError
 
 console = Console()
+
+
+class SyncProgressTracker:
+    """Real-time progress tracker for sync operations."""
+
+    def __init__(self):
+        self.progress_data = {
+            "current_phase": "Initializing",
+            "current_file": "",
+            "files_completed": 0,
+            "total_files": 0,
+            "bytes_transferred": 0,
+            "total_bytes": 0,
+            "transfer_rate": 0,
+            "eta_seconds": 0,
+            "percentage": 0,
+            "start_time": time.time(),
+        }
+        self.lock = threading.Lock()
+        self.live_display = None
+
+    def update_progress(self, stats: Dict[str, Any]):
+        """Update progress with new stats from rsync."""
+        with self.lock:
+            self.progress_data.update({
+                "current_file": stats.get("current_file", ""),
+                "files_completed": stats.get("files_transferred", 0),
+                "bytes_transferred": stats.get("bytes_transferred", 0),
+                "transfer_rate": stats.get("rate_bps", 0),
+                "eta_seconds": stats.get("eta_seconds", 0),
+                "percentage": stats.get("percentage", 0),
+            })
+
+            # Update sync phase if provided
+            if stats.get("sync_phase"):
+                self.progress_data["current_phase"] = stats["sync_phase"]
+
+            # Update total bytes if we have it
+            if stats.get("total_bytes", 0) > 0:
+                self.progress_data["total_bytes"] = stats["total_bytes"]
+
+    def set_phase(self, phase: str):
+        """Set the current sync phase."""
+        with self.lock:
+            self.progress_data["current_phase"] = phase
+
+    def create_progress_panel(self) -> Panel:
+        """Create a Rich panel showing current progress."""
+        with self.lock:
+            data = self.progress_data.copy()
+
+        # Format transfer rate
+        rate_bps = data["transfer_rate"]
+        if rate_bps > 1024 * 1024:
+            rate_str = f"{rate_bps / (1024 * 1024):.1f} MB/s"
+        elif rate_bps > 1024:
+            rate_str = f"{rate_bps / 1024:.1f} KB/s"
+        else:
+            rate_str = f"{rate_bps:.0f} B/s"
+
+        # Format bytes transferred
+        bytes_transferred = data["bytes_transferred"]
+        total_bytes = data["total_bytes"]
+        if total_bytes > 0:
+            # Use the larger of the two for display formatting to handle cases where
+            # bytes_transferred might exceed total_bytes due to rsync quirks
+            display_total = max(total_bytes, bytes_transferred)
+
+            if display_total > 1024 * 1024:
+                size_str = f"{bytes_transferred / (1024 * 1024):.1f} / {total_bytes / (1024 * 1024):.1f} MB"
+            elif display_total > 1024:
+                size_str = f"{bytes_transferred / 1024:.1f} / {total_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{bytes_transferred} / {total_bytes} bytes"
+        else:
+            if bytes_transferred > 1024 * 1024:
+                size_str = f"{bytes_transferred / (1024 * 1024):.1f} MB"
+            elif bytes_transferred > 1024:
+                size_str = f"{bytes_transferred / 1024:.1f} KB"
+            else:
+                size_str = f"{bytes_transferred} bytes"
+
+        # Format ETA
+        eta_seconds = data["eta_seconds"]
+        if eta_seconds > 0:
+            if eta_seconds > 3600:
+                eta_str = f"{eta_seconds // 3600:.0f}h {(eta_seconds % 3600) // 60:.0f}m"
+            elif eta_seconds > 60:
+                eta_str = f"{eta_seconds // 60:.0f}m {eta_seconds % 60:.0f}s"
+            else:
+                eta_str = f"{eta_seconds:.0f}s"
+        else:
+            eta_str = "Calculating..."
+
+        # Format elapsed time
+        elapsed = time.time() - data["start_time"]
+        if elapsed > 3600:
+            elapsed_str = f"{elapsed // 3600:.0f}h {(elapsed % 3600) // 60:.0f}m"
+        elif elapsed > 60:
+            elapsed_str = f"{elapsed // 60:.0f}m {elapsed % 60:.0f}s"
+        else:
+            elapsed_str = f"{elapsed:.0f}s"
+
+        # Create progress content
+        content = []
+        content.append(f"🔄 Phase: [bold]{data['current_phase']}[/bold]")
+
+        if data["current_file"]:
+            content.append(f"📄 Current: {data['current_file']}")
+
+        if data["percentage"] > 0:
+            # Cap percentage at 100% for display (rsync can sometimes report > 100%)
+            display_percentage = min(100.0, data["percentage"])
+            content.append(f"📊 Progress: {display_percentage:.1f}%")
+
+        content.append(f"📦 Transferred: {size_str}")
+
+        if rate_bps > 0:
+            content.append(f"⚡ Speed: {rate_str}")
+
+        content.append(f"⏱️  Elapsed: {elapsed_str}")
+
+        if eta_seconds > 0:
+            content.append(f"⏳ ETA: {eta_str}")
+
+        return Panel(
+            "\n".join(content),
+            title="🔄 Sync Progress",
+            border_style="blue",
+        )
 
 
 def setup_logging(verbose: bool = False):
@@ -228,30 +369,64 @@ def status(ctx, output_json):
 def sync(ctx, output_json, dry_run):
     """Perform bidirectional synchronization."""
     try:
-        action = (
-            "Dry run - showing what would be synced"
-            if dry_run
-            else "Starting bidirectional sync"
+        # Initialize orchestrator
+        orchestrator = SyncOrchestrator.from_config_file(
+            config_path=ctx.obj["config_path"], profile=ctx.obj["profile"]
         )
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task(action + "...", total=None)
+        if dry_run:
+            # For dry run, use simple spinner
+            action = "Dry run - showing what would be synced"
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(action + "...", total=None)
+                results = orchestrator.sync_all_directories(
+                    mode="bidirectional", dry_run=dry_run
+                )
+                progress.remove_task(task)
+        else:
+            # For actual sync, use real-time progress tracking
+            progress_tracker = SyncProgressTracker()
 
-            # Initialize orchestrator
-            orchestrator = SyncOrchestrator.from_config_file(
-                config_path=ctx.obj["config_path"], profile=ctx.obj["profile"]
-            )
+            def progress_callback(stats: Dict[str, Any]):
+                """Handle progress updates from rsync."""
+                progress_tracker.update_progress(stats)
 
-            # Perform sync
-            results = orchestrator.sync_all_directories(
-                mode="bidirectional", dry_run=dry_run
-            )
+            # Start live display
+            with Live(
+                progress_tracker.create_progress_panel(),
+                console=console,
+                refresh_per_second=4,
+                transient=False
+            ) as live:
+                progress_tracker.live_display = live
 
-            progress.remove_task(task)
+                # Update display periodically
+                def update_display():
+                    while hasattr(progress_tracker, 'live_display') and progress_tracker.live_display:
+                        try:
+                            live.update(progress_tracker.create_progress_panel())
+                            time.sleep(0.25)
+                        except:
+                            break
+
+                # Start display update thread
+                display_thread = threading.Thread(target=update_display, daemon=True)
+                display_thread.start()
+
+                try:
+                    # Perform sync with progress callback
+                    progress_tracker.set_phase("Preparing sync")
+                    results = orchestrator.sync_all_directories(
+                        mode="bidirectional", dry_run=dry_run, progress_callback=progress_callback
+                    )
+                    progress_tracker.set_phase("Completed")
+                finally:
+                    # Stop live display
+                    progress_tracker.live_display = None
 
         if output_json:
             console.print(json.dumps(results, indent=2, default=str))

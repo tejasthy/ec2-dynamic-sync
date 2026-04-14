@@ -110,7 +110,7 @@ class SyncOrchestrator:
             return False
 
     def sync_all_directories(
-        self, mode: SyncMode = SyncMode.BIDIRECTIONAL, dry_run: bool = False
+        self, mode: SyncMode = SyncMode.BIDIRECTIONAL, dry_run: bool = False, progress_callback: Optional[callable] = None
     ) -> Dict[str, Any]:
         """Sync all configured directories."""
         if not self.current_host:
@@ -138,20 +138,49 @@ class SyncOrchestrator:
             self.logger.info(f"Syncing directory: {mapping.local_path}")
 
             try:
-                if mode == SyncMode.BIDIRECTIONAL:
-                    result = self.rsync_manager.sync_bidirectional(
-                        self.current_host, mapping, dry_run
-                    )
-                elif mode == SyncMode.LOCAL_TO_REMOTE:
-                    result = self.rsync_manager.sync_local_to_remote(
-                        self.current_host, mapping, dry_run
-                    )
-                elif mode == SyncMode.REMOTE_TO_LOCAL:
-                    result = self.rsync_manager.sync_remote_to_local(
-                        self.current_host, mapping, dry_run
-                    )
+                # Use enhanced sync with progress callback if provided
+                if progress_callback:
+                    if mode == SyncMode.BIDIRECTIONAL:
+                        sync_result = self.rsync_manager.sync_with_progress(
+                            self.current_host, mapping, mode="bidirectional", dry_run=dry_run, progress_callback=progress_callback
+                        )
+                    elif mode == SyncMode.LOCAL_TO_REMOTE:
+                        sync_result = self.rsync_manager.sync_with_progress(
+                            self.current_host, mapping, mode="local_to_remote", dry_run=dry_run, progress_callback=progress_callback
+                        )
+                    elif mode == SyncMode.REMOTE_TO_LOCAL:
+                        sync_result = self.rsync_manager.sync_with_progress(
+                            self.current_host, mapping, mode="remote_to_local", dry_run=dry_run, progress_callback=progress_callback
+                        )
+                    else:
+                        sync_result = None
+
+                    # Convert SyncResult to dict format
+                    if sync_result:
+                        result = {
+                            "success": sync_result.success,
+                            "error": sync_result.error_message,
+                            "stats": sync_result.stats,
+                            "duration": sync_result.duration,
+                        }
+                    else:
+                        result = {"success": False, "error": f"Unknown sync mode: {mode}"}
                 else:
-                    result = {"success": False, "error": f"Unknown sync mode: {mode}"}
+                    # Use compatibility methods without progress callback
+                    if mode == SyncMode.BIDIRECTIONAL:
+                        result = self.rsync_manager.sync_bidirectional(
+                            self.current_host, mapping, dry_run
+                        )
+                    elif mode == SyncMode.LOCAL_TO_REMOTE:
+                        result = self.rsync_manager.sync_local_to_remote(
+                            self.current_host, mapping, dry_run
+                        )
+                    elif mode == SyncMode.REMOTE_TO_LOCAL:
+                        result = self.rsync_manager.sync_remote_to_local(
+                            self.current_host, mapping, dry_run
+                        )
+                    else:
+                        result = {"success": False, "error": f"Unknown sync mode: {mode}"}
 
                 results["directories"][mapping.name] = result
 

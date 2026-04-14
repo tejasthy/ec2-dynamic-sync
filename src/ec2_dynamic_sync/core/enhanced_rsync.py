@@ -208,7 +208,8 @@ class ProgressReporter:
                 "bytes_transferred": self.bytes_transferred,
                 "total_bytes": self.total_bytes,
                 "percentage": percentage,
-                "rate_mbps": rate_mbps,
+                "rate_bps": rate_bps,  # CLI expects rate_bps
+                "rate_mbps": rate_mbps,  # Keep for compatibility
                 "eta_seconds": eta_seconds,
                 "current_file": self.current_file,
                 "files_transferred": self.files_transferred,
@@ -353,10 +354,8 @@ class EnhancedRsyncManager:
         ):
             cmd.extend(["--bwlimit", str(self.config.sync_options.bandwidth_limit)])
 
-        # SSH options
-        ssh_cmd = f"ssh -i {self.ssh_manager.config.key_file} -p {self.ssh_manager.config.port}"
-        if self.ssh_manager.config.connect_timeout:
-            ssh_cmd += f" -o ConnectTimeout={self.ssh_manager.config.connect_timeout}"
+        # SSH options - use the SSH manager's proper SSH command
+        ssh_cmd = self.ssh_manager.build_rsync_ssh_command()
         cmd.extend(["-e", ssh_cmd])
 
         # Exclude patterns
@@ -378,44 +377,74 @@ class EnhancedRsyncManager:
 
     def _parse_rsync_progress(self, line: str, progress: ProgressReporter):
         """Parse rsync output line for progress information."""
+
         # Parse file transfer progress lines like:
-        # "filename.txt    1,234,567  45%  123.45kB/s    0:00:12"
+        # "1081344   2%    1.03MB/s   00:00:39"
+        # "43888890 100% 1019.25KB/s   00:00:42 (xfer#1, to-check=1/2)"
         if "%" in line and ("kB/s" in line or "MB/s" in line or "B/s" in line):
             parts = line.split()
             if len(parts) >= 4:
                 try:
-                    # Extract filename (first part)
-                    filename = parts[0]
+                    # Extract bytes transferred (first part)
+                    bytes_transferred = int(parts[0])
 
-                    # Find percentage
-                    for part in parts:
-                        if "%" in part:
-                            percentage = float(part.replace("%", ""))
-                            break
+                    # Extract percentage (second part)
+                    percentage = float(parts[1].replace("%", ""))
 
-                    # Find transfer rate
+                    # Extract transfer rate (third part)
+                    rate_str = parts[2]
                     rate_bps = 0
-                    for part in parts:
-                        if "kB/s" in part:
-                            rate_bps = float(part.replace("kB/s", "")) * 1024
-                            break
-                        elif "MB/s" in part:
-                            rate_bps = float(part.replace("MB/s", "")) * 1024 * 1024
-                            break
-                        elif "B/s" in part:
-                            rate_bps = float(part.replace("B/s", ""))
-                            break
+                    if "kB/s" in rate_str:
+                        rate_bps = float(rate_str.replace("kB/s", "")) * 1024
+                    elif "MB/s" in rate_str:
+                        rate_bps = float(rate_str.replace("MB/s", "")) * 1024 * 1024
+                    elif "B/s" in rate_str:
+                        rate_bps = float(rate_str.replace("B/s", ""))
 
-                    # Update progress
+                    # Extract ETA (fourth part) - format: HH:MM:SS
+                    eta_str = parts[3]
+                    eta_seconds = 0
+                    if ":" in eta_str:
+                        time_parts = eta_str.split(":")
+                        if len(time_parts) == 3:  # HH:MM:SS
+                            eta_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+                        elif len(time_parts) == 2:  # MM:SS
+                            eta_seconds = int(time_parts[0]) * 60 + int(time_parts[1])
+
+                    # Update progress with actual values from rsync
                     progress.update(
-                        bytes_transferred=int(percentage * progress.total_bytes / 100) if progress.total_bytes > 0 else 0,
-                        current_file=filename
+                        bytes_transferred=bytes_transferred,
+                        current_file=f"File {progress.files_transferred + 1}"  # Generic file indicator
                     )
 
-                except (ValueError, IndexError):
-                    pass
+                    # Update the progress reporter's internal state for rate calculation
+                    with progress.lock:
+                        progress.bytes_transferred = bytes_transferred
 
-        # Parse summary lines for total size
+                        # Calculate total bytes from percentage, but be smarter about it
+                        if percentage > 0 and percentage <= 100:
+                            # Calculate estimated total from current progress
+                            estimated_total = int(bytes_transferred / (percentage / 100))
+
+                            # Only update total_bytes if:
+                            # 1. We don't have a total yet, OR
+                            # 2. The new estimate is more reliable (higher percentage = more accurate)
+                            # 3. The percentage is reasonable (not > 100%)
+                            if (progress.total_bytes == 0 or
+                                (percentage >= 10 and estimated_total > progress.total_bytes * 0.8)):
+                                progress.total_bytes = estimated_total
+                                self.logger.debug(f"Updated total size estimate: {estimated_total:,} bytes from {percentage}% progress")
+
+                        # Cap percentage at 100% for display purposes
+                        if progress.total_bytes > 0:
+                            actual_percentage = min(100.0, (bytes_transferred / progress.total_bytes) * 100)
+                        else:
+                            actual_percentage = percentage
+
+                except (ValueError, IndexError) as e:
+                    self.logger.debug(f"Failed to parse progress line: {line}, error: {e}")
+
+        # Parse summary lines for total size - this is the most authoritative source
         elif "total size is" in line:
             try:
                 # Extract total size from line like "total size is 1,234,567  speedup is 1.23"
@@ -423,9 +452,20 @@ class EnhancedRsyncManager:
                 if len(parts) > 1:
                     size_part = parts[1].split()[0].replace(",", "")
                     total_size = int(size_part)
-                    progress.total_bytes = total_size
-            except (ValueError, IndexError):
-                pass
+                    with progress.lock:
+                        # Always use the authoritative total size from rsync
+                        progress.total_bytes = total_size
+                        self.logger.debug(f"Set authoritative total size: {total_size:,} bytes from rsync summary")
+            except (ValueError, IndexError) as e:
+                self.logger.debug(f"Failed to parse total size line: {line}, error: {e}")
+
+        # Parse file name lines (lines that don't have % but are file names)
+        elif line and not line.startswith("Transfer starting") and not "sent" in line and not "received" in line:
+            # This might be a filename being transferred
+            if "/" in line or "." in line:  # Likely a file path
+                with progress.lock:
+                    progress.current_file = line.strip()
+                    progress.files_transferred += 1
 
     def _sync_bidirectional_enhanced(
         self,
@@ -444,15 +484,29 @@ class EnhancedRsyncManager:
 
         # For bidirectional sync, we disable --delete to prevent data loss
         # and use --update to only transfer newer files
+
+        # Create a wrapper callback to indicate sync direction
+        def local_to_remote_callback(stats):
+            if progress_callback:
+                stats["sync_direction"] = "local_to_remote"
+                stats["sync_phase"] = "Local → Remote"
+                progress_callback(stats)
+
+        def remote_to_local_callback(stats):
+            if progress_callback:
+                stats["sync_direction"] = "remote_to_local"
+                stats["sync_phase"] = "Remote → Local"
+                progress_callback(stats)
+
         local_to_remote = self._sync_local_to_remote_enhanced(
-            host, mapping, dry_run, progress, progress_callback,
+            host, mapping, dry_run, progress, local_to_remote_callback,
             use_update=True, use_delete=False
         )
 
         # Always attempt remote to local sync, even if local to remote had issues
         # This ensures we don't skip pulling remote changes due to minor local issues
         remote_to_local = self._sync_remote_to_local_enhanced(
-            host, mapping, dry_run, progress, progress_callback,
+            host, mapping, dry_run, progress, remote_to_local_callback,
             use_update=True, use_delete=False
         )
 
